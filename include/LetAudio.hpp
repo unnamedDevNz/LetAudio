@@ -17,12 +17,15 @@ class LETAUDIO_EXPORT Engine {
 public:
     /// Creates engine and opens default audio output device.
     /// @return Engine or error.
-    static std::expected<std::unique_ptr<Engine>, std::string_view> create();
+    /// @param logging Boolean value that determines whether engine will log info and errors.
+    static std::expected<std::unique_ptr<Engine>, std::string_view> create(bool logging = false);
+
+    /// Toggles logging (by default disabled).
+    /// @param enabled Boolean value (enabled/disabled).
+    void toggle_logging(bool enabled);
 
     /// Destroys engine and all belonging sources.
     ~Engine() noexcept;
-
-    Engine() = delete;
     Engine(const Engine&) = delete;
     Engine(Engine&&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -60,6 +63,7 @@ private:
     friend class Source;
     struct Impl;
     std::unique_ptr<Impl> impl;
+    Engine();
 };
 
 

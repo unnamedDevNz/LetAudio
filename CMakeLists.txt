@@ -14,8 +14,8 @@ find_package(SndFile CONFIG REQUIRED)
 add_library(LetAudio SHARED
     src/LetAudio.cpp
 )
-
 generate_export_header(LetAudio EXPORT_FILE_NAME ${CMAKE_CURRENT_BINARY_DIR}/include/LetAudio_export.h)
+
 target_link_libraries(LetAudio PRIVATE
     OpenAL::OpenAL
     SndFile::sndfile
