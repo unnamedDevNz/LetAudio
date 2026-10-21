@@ -121,6 +121,8 @@ Engine::Impl::~Impl() noexcept {
 
 struct Source::Impl {
     Engine* engine = nullptr;
+    Source* owner = nullptr;
+
     PositioningType positioning_type;
     DecodingType decoding_type;
     int buffer_samples, buffers_count;
@@ -134,10 +136,16 @@ struct Source::Impl {
     SF_INFO sf_info{};
     SNDFILE* snd_file = nullptr;
 
+    PlaybackStatus state = PlaybackStatus::Idle;
+    std::mutex state_mutex;
+
+    float volume = 1.0f;
+
     Impl() = default;
     ~Impl() noexcept;
-    static std::expected<std::unique_ptr<Impl>, std::string_view> create(Engine* engine, CreateSettings create_settings);
+    static std::expected<std::unique_ptr<Impl>, std::string_view> create(Engine* engine, Source* owner, CreateSettings create_settings);
 };
+
 Source::Source() = default;
 Source::~Source() noexcept {
     if (impl && impl->engine)
@@ -147,7 +155,7 @@ Source::~Source() noexcept {
 std::expected<std::unique_ptr<Source>, std::string_view> Source::create(Engine* engine, CreateSettings create_settings) {
     std::unique_ptr<Source> source(new Source());
 
-    auto impl = Impl::create(engine, create_settings);
+    auto impl = Impl::create(engine, source.get(), create_settings);
     if (!impl) return std::unexpected(impl.error());
     source->impl = std::move(impl.value());
 
@@ -166,11 +174,12 @@ void Engine::Impl::unregister_source(Source* source) {
     std::erase(registered_sources, source);
 }
 
-std::expected<std::unique_ptr<Source::Impl>, std::string_view> Source::Impl::create(Engine* engine, CreateSettings create_settings) {
+std::expected<std::unique_ptr<Source::Impl>, std::string_view> Source::Impl::create(Engine* engine, Source* owner, CreateSettings create_settings) {
     (void)create_settings.positioning_type;
 
     std::unique_ptr<Impl> impl(new Impl());
     impl->engine = engine;
+    impl->owner = owner;
     impl->positioning_type = create_settings.positioning_type;
     impl->decoding_type = create_settings.decoding_type;
     impl->buffer_samples = create_settings.buffer_samples;
@@ -195,17 +204,17 @@ std::expected<std::unique_ptr<Source::Impl>, std::string_view> Source::Impl::cre
 }
 
 Source::Impl::~Impl() noexcept {
-    alSourceStop(al_source);
-    
-    alDeleteSources(1, &al_source);
-    alDeleteBuffers(buffers.size(), buffers.data());
-
-    if (snd_file) sf_close(snd_file);
+    owner->unload_file();
 }
 
 std::expected<void, std::string_view> Source::load_file(std::string_view path) {
     if (impl->decoding_type != DecodingType::Preload)
         return std::unexpected("Only Preload mode is supported");
+
+    if (impl->state != PlaybackStatus::Idle)
+        stop();
+
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
 
     impl->current_path = std::string(path);
 
@@ -246,7 +255,6 @@ std::expected<void, std::string_view> Source::load_file(std::string_view path) {
     if (impl->engine->impl->check_al_error("alSourcei (AL_BUFFER)"))
         return std::unexpected("Failed to bind AL buffer to source");
 
-
     if (impl->engine->impl->logging)
         std::println("<LetAudio>: Successfully preloaded file '{}' (Channels: {}, Sample rate: {}Hz)", 
                      impl->current_path, impl->sf_info.channels, impl->sf_info.samplerate);
@@ -269,10 +277,78 @@ Source::DecodingType Source::source_decoding_type() const {
 void Source::play() {
     if (impl->decoding_type != DecodingType::Preload)
         return;
+    
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
 
-    alSourceRewind(impl->al_source);
-    alSourcePlay(impl->al_source);
-    impl->engine->impl->check_al_error("alSourcePlay");
+    if (impl->state != PlaybackStatus::Playing) {
+        if (impl->state != PlaybackStatus::Paused) alSourceRewind(impl->al_source);
+        alSourcePlay(impl->al_source);
+        impl->engine->impl->check_al_error("alSourcePlay");
+
+        impl->state = PlaybackStatus::Playing;
+    }
+}
+
+void Source::stop() {
+    if (impl->decoding_type != DecodingType::Preload)
+        return;
+
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+
+    if (impl->state != PlaybackStatus::Idle) {
+        alSourceStop(impl->al_source);
+        impl->engine->impl->check_al_error("alSourceStop");
+
+        impl->state = PlaybackStatus::Idle;
+    }
+}
+
+void Source::pause() {
+    if (impl->decoding_type != DecodingType::Preload)
+        return;
+
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+
+    if (impl->state == PlaybackStatus::Playing) {
+        alSourcePause(impl->al_source);
+        impl->engine->impl->check_al_error("alSourcePause");
+
+        impl->state = PlaybackStatus::Paused;
+    }
+}
+
+Source::PlaybackStatus Source::playback_status() const {
+    return impl->state;
+}
+
+double Source::file_duration() const {
+    return impl->snd_file ? impl->sf_info.frames / impl->sf_info.samplerate : 0;
+}
+
+void Source::unload_file() {
+    if (impl->decoding_type != DecodingType::Preload)
+        return;
+
+    if (impl->state != PlaybackStatus::Idle) stop();
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+
+    alDeleteSources(1, &impl->al_source);
+    alDeleteBuffers(impl->buffers.size(), impl->buffers.data());
+
+    if (impl->snd_file) sf_close(impl->snd_file);
+    impl->sf_info = {};
+    impl->current_path = {};
+    impl->decode_buffer.clear();
+}
+
+void Source::set_source_volume(float volume) {
+    impl->volume = volume;
+    if (impl->decoding_type == DecodingType::Preload)
+        alSourcef(impl->al_source, AL_GAIN, volume);
+}
+
+float Source::source_volume() const {
+    return impl->volume;
 }
 
 }
