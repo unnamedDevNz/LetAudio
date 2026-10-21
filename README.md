@@ -10,8 +10,8 @@ C++ library for playing audio. Part of LetEngine.
 - [libsndfile](https://github.com/libsndfile/libsndfile): LGPL
 
 ## Possibilities
-Now: nothing  
-Planned: all from [LetAudio.hpp](./include/LetAudio.hpp)
+Now: only loading 2D audio entirely in memory and playing it.  
+Planned: all commented from [LetAudio.hpp](./include/LetAudio.hpp)
 
 ## Documentation
 Documentation builds via run `doxygen` from project root. (used theme - [doxygen-awesome-css](https://github.com/jothepro/doxygen-awesome-css): MIT)  
