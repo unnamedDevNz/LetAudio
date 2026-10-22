@@ -137,7 +137,8 @@ struct Source::Impl {
     SNDFILE* snd_file = nullptr;
 
     PlaybackStatus state = PlaybackStatus::Idle;
-    std::mutex state_mutex;
+    mutable std::mutex state_mutex;
+    void sync_state();
 
     float volume = 1.0f;
 
@@ -211,10 +212,11 @@ std::expected<void, std::string_view> Source::load_file(std::string_view path) {
     if (impl->decoding_type != DecodingType::Preload)
         return std::unexpected("Only Preload mode is supported");
 
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
+
     if (impl->state != PlaybackStatus::Idle)
         stop();
-
-    std::lock_guard<std::mutex> guard(impl->state_mutex);
 
     impl->current_path = std::string(path);
 
@@ -275,62 +277,60 @@ Source::DecodingType Source::source_decoding_type() const {
 }
 
 void Source::play() {
-    if (impl->decoding_type != DecodingType::Preload)
-        return;
-    
+    if (impl->decoding_type != DecodingType::Preload) return;
     std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
 
     if (impl->state != PlaybackStatus::Playing) {
         if (impl->state != PlaybackStatus::Paused) alSourceRewind(impl->al_source);
         alSourcePlay(impl->al_source);
         impl->engine->impl->check_al_error("alSourcePlay");
-
         impl->state = PlaybackStatus::Playing;
     }
 }
 
-void Source::stop() {
-    if (impl->decoding_type != DecodingType::Preload)
-        return;
-
-    std::lock_guard<std::mutex> guard(impl->state_mutex);
-
-    if (impl->state != PlaybackStatus::Idle) {
-        alSourceStop(impl->al_source);
-        impl->engine->impl->check_al_error("alSourceStop");
-
-        impl->state = PlaybackStatus::Idle;
-    }
-}
-
 void Source::pause() {
-    if (impl->decoding_type != DecodingType::Preload)
-        return;
-
+    if (impl->decoding_type != DecodingType::Preload) return;
     std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
 
     if (impl->state == PlaybackStatus::Playing) {
         alSourcePause(impl->al_source);
         impl->engine->impl->check_al_error("alSourcePause");
-
         impl->state = PlaybackStatus::Paused;
     }
 }
 
+void Source::stop() {
+    if (impl->decoding_type != DecodingType::Preload) return;
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
+
+    if (impl->state != PlaybackStatus::Idle) {
+        alSourceStop(impl->al_source);
+        impl->engine->impl->check_al_error("alSourceStop");
+        impl->state = PlaybackStatus::Idle;
+    }
+}
+
 Source::PlaybackStatus Source::playback_status() const {
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
     return impl->state;
 }
 
 double Source::file_duration() const {
-    return impl->snd_file ? impl->sf_info.frames / impl->sf_info.samplerate : 0;
+    return impl->snd_file
+        ? static_cast<double>(impl->sf_info.frames) / impl->sf_info.samplerate
+        : 0.0;
 }
 
 void Source::unload_file() {
-    if (impl->decoding_type != DecodingType::Preload)
-        return;
+    if (impl->decoding_type != DecodingType::Preload) return;
 
-    if (impl->state != PlaybackStatus::Idle) stop();
     std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
+    if (impl->state != PlaybackStatus::Idle) stop();
 
     alDeleteSources(1, &impl->al_source);
     alDeleteBuffers(impl->buffers.size(), impl->buffers.data());
@@ -349,6 +349,18 @@ void Source::set_source_volume(float volume) {
 
 float Source::source_volume() const {
     return impl->volume;
+}
+
+void Source::Impl::sync_state() {
+    if (decoding_type != DecodingType::Preload) return;
+
+    ALint s = 0;
+    alGetSourcei(al_source, AL_SOURCE_STATE, &s);
+    switch (s) {
+        case AL_PLAYING: state = PlaybackStatus::Playing; break;
+        case AL_PAUSED:  state = PlaybackStatus::Paused;  break;
+        default:         state = PlaybackStatus::Idle;    break;
+    }
 }
 
 }
