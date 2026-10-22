@@ -4,6 +4,7 @@
 #include <AL/alc.h>
 #include <AL/alext.h>
 
+#include <algorithm>
 #include <sndfile.h>
 
 #include <utility>
@@ -142,6 +143,8 @@ struct Source::Impl {
 
     float volume = 1.0f;
 
+    sf_count_t pending_seek_frame = -1;
+
     Impl() = default;
     ~Impl() noexcept;
     static std::expected<std::unique_ptr<Impl>, std::string_view> create(Engine* engine, Source* owner, CreateSettings create_settings);
@@ -154,6 +157,8 @@ Source::~Source() noexcept {
 }
 
 std::expected<std::unique_ptr<Source>, std::string_view> Source::create(Engine* engine, CreateSettings create_settings) {
+    if (!engine) return std::unexpected("Missing required engine pointer");
+    
     std::unique_ptr<Source> source(new Source());
 
     auto impl = Impl::create(engine, source.get(), create_settings);
@@ -206,6 +211,8 @@ std::expected<std::unique_ptr<Source::Impl>, std::string_view> Source::Impl::cre
 
 Source::Impl::~Impl() noexcept {
     owner->unload_file();
+    alDeleteSources(1, &al_source);
+    alDeleteBuffers(buffers.size(), buffers.data());
 }
 
 std::expected<void, std::string_view> Source::load_file(std::string_view path) {
@@ -214,9 +221,13 @@ std::expected<void, std::string_view> Source::load_file(std::string_view path) {
 
     std::lock_guard<std::mutex> guard(impl->state_mutex);
     impl->sync_state();
+    if (impl->state != PlaybackStatus::Idle) stop();
 
-    if (impl->state != PlaybackStatus::Idle)
-        stop();
+    if (impl->snd_file) {
+        sf_close(impl->snd_file);
+        impl->snd_file = nullptr;
+    }
+    impl->decode_buffer.clear();
 
     impl->current_path = std::string(path);
 
@@ -283,6 +294,12 @@ void Source::play() {
 
     if (impl->state != PlaybackStatus::Playing) {
         if (impl->state != PlaybackStatus::Paused) alSourceRewind(impl->al_source);
+
+        if (impl->pending_seek_frame >= 0) {
+            alSourcei(impl->al_source, AL_SAMPLE_OFFSET, static_cast<ALint>(impl->pending_seek_frame));
+            impl->pending_seek_frame = -1;
+        }
+
         alSourcePlay(impl->al_source);
         impl->engine->impl->check_al_error("alSourcePlay");
         impl->state = PlaybackStatus::Playing;
@@ -311,6 +328,8 @@ void Source::stop() {
         impl->engine->impl->check_al_error("alSourceStop");
         impl->state = PlaybackStatus::Idle;
     }
+
+    impl->pending_seek_frame = -1;
 }
 
 Source::PlaybackStatus Source::playback_status() const {
@@ -332,10 +351,10 @@ void Source::unload_file() {
     impl->sync_state();
     if (impl->state != PlaybackStatus::Idle) stop();
 
-    alDeleteSources(1, &impl->al_source);
-    alDeleteBuffers(impl->buffers.size(), impl->buffers.data());
-
-    if (impl->snd_file) sf_close(impl->snd_file);
+    if (impl->snd_file) {
+        sf_close(impl->snd_file);
+        impl->snd_file = nullptr;
+    }
     impl->sf_info = {};
     impl->current_path = {};
     impl->decode_buffer.clear();
@@ -361,6 +380,47 @@ void Source::Impl::sync_state() {
         case AL_PAUSED:  state = PlaybackStatus::Paused;  break;
         default:         state = PlaybackStatus::Idle;    break;
     }
+}
+
+uint64_t Source::playback_position_frames() const {
+    if (impl->decoding_type != DecodingType::Preload || !impl->snd_file)
+        return 0;
+
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
+
+    if (impl->state == PlaybackStatus::Idle)
+        return impl->pending_seek_frame >= 0 ? impl->pending_seek_frame : 0;
+
+    ALint frames = 0;
+    alGetSourcei(impl->al_source, AL_SAMPLE_OFFSET, &frames);
+    return frames;
+}
+
+double Source::playback_position() const {
+    if (impl->decoding_type != DecodingType::Preload || !impl->snd_file)
+        return 0.0;
+
+    return static_cast<double>(playback_position_frames()) / impl->sf_info.samplerate;
+}
+
+bool Source::seek(double seconds) {
+    if (impl->decoding_type != DecodingType::Preload || !impl->snd_file)
+        return false;
+
+    std::lock_guard<std::mutex> guard(impl->state_mutex);
+    impl->sync_state();
+
+    sf_count_t frame = static_cast<sf_count_t>(seconds * impl->sf_info.samplerate);
+    frame = std::clamp<sf_count_t>(frame, 0, impl->sf_info.frames - 1);
+
+    if (impl->state == PlaybackStatus::Idle) {
+        impl->pending_seek_frame = frame;
+        return true;
+    }
+
+    alSourcei(impl->al_source, AL_SAMPLE_OFFSET, static_cast<ALint>(frame));
+    return !impl->engine->impl->check_al_error("alSourcei (AL_SAMPLE_OFFSET)");
 }
 
 }

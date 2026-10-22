@@ -20,6 +20,8 @@ public:
         Hz88200 = 88200,
         Hz96000 = 96000,
     };
+
+    /// Specifies initial settings for engine work.
     struct CreateSettings {
         bool logging = false;
         SampleRate sample_rate = SampleRate::Hz48000;
@@ -27,7 +29,6 @@ public:
 
     /// Creates engine and opens default audio output device.
     /// @return Engine or error.
-    /// @param create_settings CreateSettings struct, specifies the initial settings for the engine work.
     static std::expected<std::unique_ptr<Engine>, std::string_view> create(CreateSettings create_settings);
 
     /// Toggles logging (by default disabled).
@@ -87,6 +88,7 @@ public:
         // Streaming, // unsupported
     };
 
+    /// Specifies initial settings for source work.
     struct CreateSettings {
         PositioningType positioning_type = PositioningType::Sound2D;
         DecodingType decoding_type = DecodingType::Preload;
@@ -96,7 +98,7 @@ public:
 
     /// Creates source and registers it in Engine.
     /// @return Source or error.
-    /// @param create_settings CreateSettings struct, specifies the initial settings for the source work.
+    /// @param engine Engine*, required. Engine for associate source with.
     static std::expected<std::unique_ptr<Source>, std::string_view> create(Engine* engine, CreateSettings create_settings);
 
     Source(const Source&) = delete;
@@ -161,17 +163,22 @@ public:
     /// Stops playback (stops playing, resets position).
     void stop();
 
-    // /// Moves the playback position. Can be used while playing.
-    // /// @param seconds Double value of position (in seconds) to jump to.
-    // void seek(double seconds);
+    /// Moves the playback position. Can be used while playing.
+    /// @param seconds Double value of position (in seconds) to jump to.
+    /// @return true on success, false on fail
+    bool seek(double seconds);
     
     /// Current status of playback.
     /// @return PlaybackStatus enum.
     PlaybackStatus playback_status() const;
 
-    // /// Current position of playback.
-    // /// @return Double value of playback position.
-    // double playback_position() const;
+    /// Current position of playback in seconds.
+    /// @return Double value of playback position.
+    double playback_position() const;
+
+    /// Current position of playback in frames.
+    /// @return uint64_t value of playback position in frames.
+    uint64_t playback_position_frames() const;
 
 private:
     friend class Engine;
